@@ -21,13 +21,13 @@ PATIENT_ID = "001"
 INTERVAL_SECONDS = 5
 
 # Kafka Configuration
-KAFKA_BROKER = 'localhost:9092'
+KAFKA_BROKERS = 'localhost:9092'
 TOPIC_NAME = 'vitals-updates'
 
 class KafkaVitalsProducer:
     def __init__(self):
         self.producer = KafkaProducer(
-            bootstrap_servers=[KAFKA_BROKER],
+            bootstrap_servers=[KAFKA_BROKERS],
             value_serializer=lambda x: json.dumps(x).encode('utf-8')
         )
     
@@ -268,3 +268,7 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         print("\n👋 Monitoring stopped.")
+
+
+
+# C:\PregnancyMonitor\FinalYearProject-dbf78de82c34b695b6a120e5b07b6e4ebc3cd953>docker exec -it pm-kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic vitals-updates --from-beginning
