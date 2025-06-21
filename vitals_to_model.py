@@ -1,4 +1,3 @@
-# Updated clinical_monitoring.py
 import time
 import random
 from datetime import datetime
@@ -61,17 +60,15 @@ def calculate_severity(df):
     ]
     
     choices = [
-        'Normal',
+        'No Preeclampsia',
         'Mild',
         'Moderate',
         'Severe',
-        'Mild',
-        'Moderate'
     ]
     
-    result = np.select(conditions, choices, default='Normal')
+    result = np.select(conditions, choices, default='No Preeclampsia')
     normal_map_mask = (df['MAP'] >= 70) & (df['MAP'] <= 100)
-    result = np.where(normal_map_mask, 'Normal', result)
+    result = np.where(normal_map_mask, 'No Preeclampsia', result)
     
     return result
 
@@ -100,25 +97,32 @@ def train_and_save_model():
     print("✅ Severity model trained and saved")
     return features
 
-def classify_manual(systolic, diastolic, protein, map_val):
+def classify_manual(systolic, diastolic, protein, map_val, glucose):
     """Manual classification based on clinical guidelines"""
+    # Add glucose consideration to severity classification
+    severity_note = ""
+    if glucose > 140:
+        severity_note = " (Elevated Glucose)"
+    elif glucose < 70:
+        severity_note = " (Low Glucose)"
+    
     if 70 <= map_val <= 100:
-        return "Normal", "MAP in normal range (70-100)"
+        return "No Preeclampsia", f"MAP in normal range (70-100){severity_note}"
     elif 107 <= map_val <= 113:
         if protein >= 1:
-            return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein}+ (≥1)"
-        return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein} (below threshold)"
+            return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein}+ (≥1){severity_note}"
+        return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein} (below threshold){severity_note}"
     elif 114 <= map_val <= 129:
         if protein >= 2:
-            return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein}+ (≥2)"
-        return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein} (below threshold)"
+            return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein}+ (≥2){severity_note}"
+        return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein} (below threshold){severity_note}"
     elif map_val >= 130:
         if protein >= 2:
-            return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein}+ (≥2)"
-        return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein} (below threshold)"
+            return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein}+ (≥2){severity_note}"
+        return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein} (below threshold){severity_note}"
     elif 101 <= map_val <= 106:
-        return "Normal", f"MAP: {map_val:.1f} (101-106) - Borderline"
-    return "Normal", f"MAP: {map_val:.1f} - Below thresholds"
+        return "No Preeclampsia", f"MAP: {map_val:.1f} (101-106) - Borderline{severity_note}"
+    return "No Preeclampsia", f"MAP: {map_val:.1f} - Below thresholds{severity_note}"
 
 def predict_severity():
     """Predict severity from input vitals"""
@@ -129,10 +133,10 @@ def predict_severity():
         
         with open(INPUT_FILE, "r") as f:
             values = list(map(float, f.read().split()))
-            systolic, diastolic, protein = values[:3]
+            systolic, diastolic, protein, glucose = values[:4]  # Added glucose as 4th value
         
         map_val = (systolic + 2 * diastolic) / 3
-        manual_severity, explanation = classify_manual(systolic, diastolic, protein, map_val)
+        manual_severity, explanation = classify_manual(systolic, diastolic, protein, map_val, glucose)
         
         features = pd.DataFrame([[systolic, diastolic, protein, map_val]],
                               columns=['Systolic_BP', 'Diastolic_BP', 'Protein_Urine', 'MAP'])
@@ -142,16 +146,17 @@ def predict_severity():
         proba = model.predict_proba(features_scaled)[0]
         ml_severity = encoder.inverse_transform([pred])[0]
         
-        # Prepare output data for Kafka
+        # Prepare output data for Kafka (added glucose)
         output_data = {
             'patientId': PATIENT_ID,
             'systolic': systolic,
             'diastolic': diastolic,
             'map': map_val,
             'proteinuria': int(protein),
-            'temperature': values[3] if len(values) > 3 else 36.5,
-            'heartRate': values[4] if len(values) > 4 else 75,
-            'spo2': values[5] if len(values) > 5 else 98,
+            'glucose': glucose,  # Added blood glucose
+            'temperature': values[4] if len(values) > 4 else 36.5,
+            'heartRate': values[5] if len(values) > 5 else 75,
+            'spo2': values[6] if len(values) > 6 else 98,
             'severity': manual_severity,
             'rationale': explanation,
             'mlSeverity': ml_severity,
@@ -169,12 +174,13 @@ def predict_severity():
         print(f"   • Blood Pressure: {systolic}/{diastolic} mmHg")
         print(f"   • Mean Arterial Pressure (MAP): {map_val:.1f} mmHg")
         print(f"   • Proteinuria: {protein}+ (0-4 scale)")
-        if len(values) > 3:
-            print(f"   • Body Temperature: {values[3]}°C")
+        print(f"   • Blood Glucose: {glucose} mg/dL")  # Added glucose display
         if len(values) > 4:
-            print(f"   • Heart Rate: {values[4]} bpm")
+            print(f"   • Body Temperature: {values[4]}°C")
         if len(values) > 5:
-            print(f"   • Oxygen Saturation (SpO2): {values[5]}%")
+            print(f"   • Heart Rate: {values[5]} bpm")
+        if len(values) > 6:
+            print(f"   • Oxygen Saturation (SpO2): {values[6]}%")
         print()
         print(f"🏥 CLINICAL CLASSIFICATION:")
         print(f"   • Severity: {manual_severity}")
@@ -204,9 +210,9 @@ def predict_severity():
 
 def generate_vitals():
     """Generate simulated patient data with realistic ranges"""
-    map_category = random.choice(['normal', 'mild', 'moderate', 'severe'])
+    map_category = random.choice(['no preeclampsia', 'mild', 'moderate', 'severe'])
     
-    if map_category == 'normal':
+    if map_category == 'no preeclampsia':
         map_val = random.uniform(70, 100)
         protein = random.choice([0, 0, 0, 1])
     elif map_category == 'mild':
@@ -223,6 +229,9 @@ def generate_vitals():
     systolic = int(3 * map_val - 2 * diastolic)
     systolic = max(100, min(200, systolic))
     
+    # Generate blood glucose with realistic pregnancy ranges
+    glucose = random.uniform(70, 200)  # Normal range 70-140, but can go higher in gestational diabetes
+    
     temperature = round(random.uniform(36.0, 37.5), 1)
     heart_rate = random.randint(60, 100)
     spo2 = random.randint(95, 100)
@@ -231,6 +240,7 @@ def generate_vitals():
         'systolic': systolic,
         'diastolic': diastolic,
         'protein': int(protein),
+        'glucose': round(glucose, 1),  # Added glucose
         'temperature': temperature,
         'heart_rate': heart_rate,
         'spo2': spo2
@@ -255,12 +265,14 @@ if __name__ == "__main__":
             print(f"  • BP: {vitals['systolic']}/{vitals['diastolic']} mmHg")
             print(f"  • MAP: {map_val:.1f} mmHg (calculated)")
             print(f"  • Proteinuria: {vitals['protein']}+ (0-4 scale)")
+            print(f"  • Blood Glucose: {vitals['glucose']} mg/dL")  # Added glucose display
             print(f"  • Body Temperature: {vitals['temperature']}°C")
             print(f"  • Heart Rate: {vitals['heart_rate']} bpm")
             print(f"  • Oxygen Saturation (SpO2): {vitals['spo2']}%")
             
             with open(INPUT_FILE, 'w') as f:
                 f.write(f"{vitals['systolic']} {vitals['diastolic']} {vitals['protein']} "
+                        f"{vitals['glucose']} "  # Added glucose to file
                         f"{vitals['temperature']} {vitals['heart_rate']} {vitals['spo2']}")
             
             predict_severity()
@@ -268,7 +280,3 @@ if __name__ == "__main__":
             
     except KeyboardInterrupt:
         print("\n👋 Monitoring stopped.")
-
-
-
-# C:\PregnancyMonitor\FinalYearProject-dbf78de82c34b695b6a120e5b07b6e4ebc3cd953>docker exec -it pm-kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic vitals-updates --from-beginning
