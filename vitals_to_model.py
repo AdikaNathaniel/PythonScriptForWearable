@@ -1,9 +1,12 @@
+# Updated clinical_monitoring.py
 import time
 import random
 from datetime import datetime
+import json
+from kafka import KafkaProducer
+import os
 import pandas as pd
 import joblib
-import os
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -17,6 +20,27 @@ INPUT_FILE = "input.txt"
 PATIENT_ID = "001"
 INTERVAL_SECONDS = 5
 
+# Kafka Configuration
+KAFKA_BROKER = 'localhost:9092'
+TOPIC_NAME = 'vitals-updates'
+
+class KafkaVitalsProducer:
+    def __init__(self):
+        self.producer = KafkaProducer(
+            bootstrap_servers=[KAFKA_BROKER],
+            value_serializer=lambda x: json.dumps(x).encode('utf-8')
+        )
+    
+    def send_vitals(self, vitals_data):
+        try:
+            self.producer.send(TOPIC_NAME, value=vitals_data)
+            print(f"📤 Sent vitals data to Kafka: {vitals_data}")
+        except Exception as e:
+            print(f"❌ Error sending vitals data: {e}")
+
+# Initialize Kafka producer
+vitals_producer = KafkaVitalsProducer()
+
 def setup_environment():
     """Verify all files exist."""
     os.chdir(WORKING_DIR)
@@ -26,140 +50,90 @@ def setup_environment():
         raise FileNotFoundError("Missing CSV dataset file")
 
 def calculate_severity(df):
-    """Calculate severity levels based on clinical thresholds from University of Ghana guidelines"""
-    # First check if MAP indicates any level of preeclampsia
-    # If MAP is in normal range (70-100), it's not preeclampsia regardless of protein
-    
+    """Calculate severity levels based on clinical thresholds"""
     conditions = [
-        # Normal/Low - MAP 70-100, Protein NIL
         (df['MAP'] >= 70) & (df['MAP'] <= 100) & (df['Protein_Urine'] == 0),
-        
-        # Mild Preeclampsia - MAP 107-113, Protein 1+
         (df['MAP'] >= 107) & (df['MAP'] <= 113) & (df['Protein_Urine'] >= 1),
-        
-        # Moderate Preeclampsia - MAP 114-129, Protein 2+ OR >
         (df['MAP'] >= 114) & (df['MAP'] <= 129) & (df['Protein_Urine'] >= 2),
-        
-        # High/Severe Preeclampsia - MAP 130 OR >, Protein 2+ OR >
         (df['MAP'] >= 130) & (df['Protein_Urine'] >= 2),
-        
-        # Cases where MAP is elevated but protein doesn't match - classify by MAP level
-        # Mild range MAP but protein doesn't match
         (df['MAP'] >= 107) & (df['MAP'] <= 113) & (df['Protein_Urine'] < 1),
-        
-        # Moderate range MAP but protein doesn't match
         (df['MAP'] >= 114) & (df['MAP'] <= 129) & (df['Protein_Urine'] < 2),
     ]
     
     choices = [
-        'Normal',      # Normal MAP and protein
-        'Mild',        # Mild preeclampsia
-        'Moderate',    # Moderate preeclampsia  
-        'Severe',      # Severe preeclampsia
-        'Mild',        # Mild range MAP (even with low protein)
-        'Moderate'     # Moderate range MAP (even with low protein)
+        'Normal',
+        'Mild',
+        'Moderate',
+        'Severe',
+        'Mild',
+        'Moderate'
     ]
     
-    # Default case: if MAP is normal (70-100) but protein is elevated, it's not preeclampsia
     result = np.select(conditions, choices, default='Normal')
-    
-    # Special handling: If MAP is in normal range (70-100), always classify as Normal
-    # regardless of protein levels (as per your note)
     normal_map_mask = (df['MAP'] >= 70) & (df['MAP'] <= 100)
     result = np.where(normal_map_mask, 'Normal', result)
     
     return result
 
 def load_and_preprocess_data():
-    """Load data and create severity labels based on University of Ghana guidelines"""
+    """Load data and create severity labels"""
     df = pd.read_csv("realistic_noisy_preeclampsia_dataset_noisy.csv")
-    
-    # Use existing MAP or calculate
     df['MAP'] = df.get('MAP', (df['Systolic_BP'] + 2 * df['Diastolic_BP']) / 3)
-    
-    # Create severity labels using the new classification
     df['Severity'] = calculate_severity(df)
-    
-    # Encode severity
     encoder = LabelEncoder()
     df['Severity_Encoded'] = encoder.fit_transform(df['Severity'])
-    
-    # Select features
     features = ['Systolic_BP', 'Diastolic_BP', 'Protein_Urine', 'MAP']
     X = df[features]
     y = df['Severity_Encoded']
-    
     return X, y, encoder, features
 
 def train_and_save_model():
     """Train and save severity prediction model"""
     X, y, encoder, features = load_and_preprocess_data()
-    
-    # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    
-    # Train model
     model = LogisticRegression(multi_class='multinomial', max_iter=1000, random_state=42)
     model.fit(X_scaled, y)
-    
-    # Save artifacts
     joblib.dump(model, MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
     joblib.dump(encoder, ENCODER_PATH)
-    print("✅ Severity model trained and saved using University of Ghana guidelines")
+    print("✅ Severity model trained and saved")
     return features
 
 def classify_manual(systolic, diastolic, protein, map_val):
-    """Manual classification based on University of Ghana guidelines"""
-    # Rule: If MAP is normal (70-100), it's not preeclampsia regardless of protein
+    """Manual classification based on clinical guidelines"""
     if 70 <= map_val <= 100:
         return "Normal", "MAP in normal range (70-100)"
-    
-    # Rule: MAP must be elevated for preeclampsia consideration
     elif 107 <= map_val <= 113:
         if protein >= 1:
             return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein}+ (≥1)"
-        else:
-            return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein} (below threshold but MAP elevated)"
-    
+        return "Mild", f"MAP: {map_val:.1f} (107-113), Protein: {protein} (below threshold)"
     elif 114 <= map_val <= 129:
         if protein >= 2:
             return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein}+ (≥2)"
-        else:
-            return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein} (below threshold but MAP elevated)"
-    
+        return "Moderate", f"MAP: {map_val:.1f} (114-129), Protein: {protein} (below threshold)"
     elif map_val >= 130:
         if protein >= 2:
             return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein}+ (≥2)"
-        else:
-            return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein} (below threshold but MAP critically elevated)"
-    
+        return "Severe", f"MAP: {map_val:.1f} (≥130), Protein: {protein} (below threshold)"
     elif 101 <= map_val <= 106:
-        return "Normal", f"MAP: {map_val:.1f} (101-106) - Borderline but below preeclampsia threshold"
-    
-    else:
-        return "Normal", f"MAP: {map_val:.1f} - Below preeclampsia thresholds"
+        return "Normal", f"MAP: {map_val:.1f} (101-106) - Borderline"
+    return "Normal", f"MAP: {map_val:.1f} - Below thresholds"
 
 def predict_severity():
-    """Predict severity from input vitals using both ML model and clinical rules"""
+    """Predict severity from input vitals"""
     try:
-        # Load models
         model = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         encoder = joblib.load(ENCODER_PATH)
         
-        # Read input
         with open(INPUT_FILE, "r") as f:
-            systolic, diastolic, protein = map(float, f.read().split())
+            values = list(map(float, f.read().split()))
+            systolic, diastolic, protein = values[:3]
         
-        # Calculate MAP
         map_val = (systolic + 2 * diastolic) / 3
-        
-        # Manual classification using clinical guidelines
         manual_severity, explanation = classify_manual(systolic, diastolic, protein, map_val)
         
-        # ML model prediction
         features = pd.DataFrame([[systolic, diastolic, protein, map_val]],
                               columns=['Systolic_BP', 'Diastolic_BP', 'Protein_Urine', 'MAP'])
         
@@ -168,7 +142,26 @@ def predict_severity():
         proba = model.predict_proba(features_scaled)[0]
         ml_severity = encoder.inverse_transform([pred])[0]
         
-        # Format output
+        # Prepare output data for Kafka
+        output_data = {
+            'patientId': PATIENT_ID,
+            'systolic': systolic,
+            'diastolic': diastolic,
+            'map': map_val,
+            'proteinuria': int(protein),
+            'temperature': values[3] if len(values) > 3 else 36.5,
+            'heartRate': values[4] if len(values) > 4 else 75,
+            'spo2': values[5] if len(values) > 5 else 98,
+            'severity': manual_severity,
+            'rationale': explanation,
+            'mlSeverity': ml_severity,
+            'mlProbability': {encoder.classes_[i]: float(proba[i]) for i in range(len(encoder.classes_))},
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        # Send to Kafka
+        vitals_producer.send_vitals(output_data)
+        
         print("\n" + "="*60)
         print("🔍 PREECLAMPSIA SEVERITY ASSESSMENT")
         print("="*60)
@@ -176,8 +169,14 @@ def predict_severity():
         print(f"   • Blood Pressure: {systolic}/{diastolic} mmHg")
         print(f"   • Mean Arterial Pressure (MAP): {map_val:.1f} mmHg")
         print(f"   • Proteinuria: {protein}+ (0-4 scale)")
+        if len(values) > 3:
+            print(f"   • Body Temperature: {values[3]}°C")
+        if len(values) > 4:
+            print(f"   • Heart Rate: {values[4]} bpm")
+        if len(values) > 5:
+            print(f"   • Oxygen Saturation (SpO2): {values[5]}%")
         print()
-        print(f"🏥 CLINICAL CLASSIFICATION (UG Guidelines):")
+        print(f"🏥 CLINICAL CLASSIFICATION:")
         print(f"   • Severity: {manual_severity}")
         print(f"   • Rationale: {explanation}")
         print()
@@ -188,7 +187,6 @@ def predict_severity():
             print(f"     - {class_name}: {proba[i]:.1%}")
         print()
         
-        # Agreement check
         if manual_severity == ml_severity:
             print("✅ Clinical and ML classifications AGREE")
         else:
@@ -206,63 +204,65 @@ def predict_severity():
 
 def generate_vitals():
     """Generate simulated patient data with realistic ranges"""
-    # Generate more realistic combinations
     map_category = random.choice(['normal', 'mild', 'moderate', 'severe'])
     
     if map_category == 'normal':
         map_val = random.uniform(70, 100)
-        protein = random.choice([0, 0, 0, 1])  # Mostly 0, occasionally 1
+        protein = random.choice([0, 0, 0, 1])
     elif map_category == 'mild':
         map_val = random.uniform(107, 113)
-        protein = random.choice([0, 1, 1, 2])  # Mix of protein levels
+        protein = random.choice([0, 1, 1, 2])
     elif map_category == 'moderate':
         map_val = random.uniform(114, 129)
-        protein = random.choice([1, 2, 2, 3])  # Higher protein levels
-    else:  # severe
+        protein = random.choice([1, 2, 2, 3])
+    else:
         map_val = random.uniform(130, 160)
-        protein = random.choice([2, 3, 3, 4])  # High protein levels
+        protein = random.choice([2, 3, 3, 4])
     
-    # Back-calculate systolic and diastolic from MAP
-    # MAP = (Systolic + 2*Diastolic) / 3
-    # Use typical pulse pressure relationships
     diastolic = random.randint(60, 110)
     systolic = int(3 * map_val - 2 * diastolic)
-    
-    # Ensure realistic ranges
     systolic = max(100, min(200, systolic))
+    
+    temperature = round(random.uniform(36.0, 37.5), 1)
+    heart_rate = random.randint(60, 100)
+    spo2 = random.randint(95, 100)
     
     return {
         'systolic': systolic,
         'diastolic': diastolic,
-        'protein': int(protein)
+        'protein': int(protein),
+        'temperature': temperature,
+        'heart_rate': heart_rate,
+        'spo2': spo2
     }
 
 if __name__ == "__main__":
     print("=== PREECLAMPSIA SEVERITY MONITORING ===")
-    print("Using University of Ghana Clinical Guidelines")
+    print("Using Clinical Guidelines")
+    print("Real-time data streaming to Kafka")
     print()
     setup_environment()
     
-    # Train model if not exists
     if not all(os.path.exists(f) for f in [MODEL_PATH, SCALER_PATH, ENCODER_PATH]):
         train_and_save_model()
     
     try:
         while True:
-            # Generate and display data
             vitals = generate_vitals()
             map_val = (vitals['systolic'] + 2 * vitals['diastolic']) / 3
             
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Patient {PATIENT_ID}:")
             print(f"  • BP: {vitals['systolic']}/{vitals['diastolic']} mmHg")
-            print(f"  • MAP: {map_val:.1f} mmHg")
+            print(f"  • MAP: {map_val:.1f} mmHg (calculated)")
             print(f"  • Proteinuria: {vitals['protein']}+ (0-4 scale)")
+            print(f"  • Body Temperature: {vitals['temperature']}°C")
+            print(f"  • Heart Rate: {vitals['heart_rate']} bpm")
+            print(f"  • Oxygen Saturation (SpO2): {vitals['spo2']}%")
             
-            # Write input
             with open(INPUT_FILE, 'w') as f:
-                f.write(f"{vitals['systolic']} {vitals['diastolic']} {vitals['protein']}")
+                f.write(f"{vitals['systolic']} {vitals['diastolic']} {vitals['protein']} "
+                        f"{vitals['temperature']} {vitals['heart_rate']} {vitals['spo2']}")
             
-            # Make prediction
             predict_severity()
             time.sleep(INTERVAL_SECONDS)
             
