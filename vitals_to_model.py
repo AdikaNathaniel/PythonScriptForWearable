@@ -18,7 +18,7 @@ SCALER_PATH = "scaler.pkl"
 ENCODER_PATH = "severity_encoder.pkl"
 INPUT_FILE = "input.txt"
 PATIENT_ID = "001"
-INTERVAL_SECONDS = 5
+INTERVAL_SECONDS = 30
 
 # Kafka Configuration
 KAFKA_BROKERS = 'localhost:9092'
